@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Change Tracker v5.2</title>
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:"Segoe UI",Tahoma,Geneva,Verdana,sans-serif;background:#f5f5f5;color:#333;padding:12px;font-size:12px}
+    .header{display:flex;align-items:center;gap:6px;margin-bottom:8px}
+    .header h1{font-size:15px;font-weight:600;color:#0078d4}
+    .badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:10px;font-weight:600;color:#fff}
+    .badge-off{background:#a0a0a0}.badge-on{background:#107c10}.badge-err{background:#d13438}.badge-lock{background:#ca5010}
+    .info{background:#fff;border:1px solid #e0e0e0;border-radius:5px;padding:8px 10px;margin-bottom:8px;font-size:11px;line-height:1.5}
+    .info b{color:#0078d4}
+    .btn{display:inline-block;padding:6px 16px;border:none;border-radius:3px;font-size:12px;font-weight:600;cursor:pointer}
+    .btn-p{background:#0078d4;color:#fff}.btn-p:hover{background:#106ebe}
+    .log{margin-top:8px;background:#1e1e1e;color:#d4d4d4;border-radius:5px;padding:8px;height:200px;overflow-y:auto;font-family:"Cascadia Code",Consolas,monospace;font-size:10px;line-height:1.5}
+    .log .ok{color:#4ec9b0}.log .wr{color:#dcdcaa}.log .er{color:#f44747}.log .in{color:#9cdcfe}.log .ed{color:#ce9178}
+    .ft{margin-top:8px;font-size:10px;color:#999;text-align:center}
+    .ft a{color:#0078d4;cursor:pointer;text-decoration:underline}
+    .name-box{display:none;margin-bottom:8px;background:#fff3cd;border:1px solid #ffc107;border-radius:4px;padding:10px;font-size:11px}
+    .name-box input{width:100%;padding:5px;margin-top:4px;border:1px solid #ccc;border-radius:3px;font-size:12px}
+    .name-box button{margin-top:6px;padding:5px 14px;font-size:11px}
+    .lock-banner{display:none;margin-bottom:8px;background:#fed9cc;border:1px solid #ca5010;border-radius:4px;padding:10px;font-size:11px;color:#6b2e00}
+  </style>
+</head>
+<body>
+<div class="header">
+  <h1>&#x1F4CA; Change Tracker</h1>
+  <span id="badge" class="badge badge-off">Initializing</span>
+  <span style="margin-left:auto;font-size:10px;color:#999">v5.2</span>
+</div>
+<div class="info">
+  <b>Sheet:</b> STD format &nbsp;|&nbsp; <b>Log:</b> changelog<br/>
+  <span id="userDisp"></span>
+  <span id="countDisp" style="float:right;font-weight:600"></span>
+</div>
+<div id="lockBanner" class="lock-banner">
+  &#x1F512; <b>Sheet is protected.</b> Please enter your name below to unlock editing and start change tracking.
+</div>
+<div id="usernamePrompt" class="name-box">
+  <b>&#x1F464; Who are you?</b><br/>
+  <input id="usernameInput" type="text" placeholder="e.g. Pranit Patil"/>
+  <button id="btnSaveName" class="btn btn-p">Save &amp; Start Tracking</button>
+</div>
+<div id="logArea" class="log"><div class="in">Waiting for Office to initialize...</div></div>
+<div class="ft">
+  Tracking continues while pane is open &bull; Close = pause<br/>
+  <a id="changeUserLink" style="display:none" onclick="changeUser()">Change username</a>
+</div>
+<script>
+var TRACKED_SHEET="STD format",CHANGELOG_SHEET="changelog",ROWID_HEADER="RowID",HEADER_ROW=0,FIRST_DATA_ROW=1;
+var cachedUsername="",shadowByRowId={},rowIndexToRowId={},HEADERS=[],rowIdColIdx=-1,effectiveColCount=0;
+var isInternalUpdate=false,isTracking=false,changeCount=0,CHUNK_SIZE=1600;
+var logArea=document.getElementById("logArea"),badge=document.getElementById("badge");
+var userDisp=document.getElementById("userDisp"),countDisp=document.getElementById("countDisp");
+var namePromptDiv=document.getElementById("usernamePrompt"),nameInput=document.getElementById("usernameInput");
+var btnSaveName=document.getElementById("btnSaveName"),lockBanner=document.getElementById("lockBanner");
+var changeUserLink=document.getElementById("changeUserLink");
+
+function log(m,c){var d=document.createElement("div");d.className=c||"in";d.textContent=m;logArea.appendChild(d);logArea.scrollTop=logArea.scrollHeight}
+function setBadge(t,c){badge.textContent=t;badge.className="badge "+c}
+function updateCount(){countDisp.textContent="Changes: "+changeCount}
+function errorToString(e){if(!e)return"Unknown error";if(typeof e==="string")return e;var p=[];if(e.message)p.push("Message: "+e.message);if(e.code)p.push("Code: "+e.code);if(e.name)p.push("Name: "+e.name);if(e.debugInfo)try{p.push("Debug: "+JSON.stringify(e.debugInfo))}catch(x){}if(e.innerError)try{p.push("Inner: "+(e.innerError.message||JSON.stringify(e.innerError)))}catch(x){}if(p.length>0)return p.join(" | ");try{var s=e.toString();if(s&&s!=="[object Object]")return s}catch(x){}return"Unknown error"}
+
+Office.onReady(async function(info){
+  if(info.host!==Office.HostType.Excel){log("\u274C Only works in Excel.","er");return}
+  log("\u2705 Office ready (Excel Online)","ok");
+  try{
+    await Excel.run(async function(ctx){
+      var ws=ctx.workbook.worksheets.getItemOrNullObject(TRACKED_SHEET);ws.load("name");await ctx.sync();
+      if(ws.isNullObject){log("\u274C Sheet '"+TRACKED_SHEET+"' not found!","er");setBadge("Error","badge-err");return}
+      try{ws.protection.unprotect();await ctx.sync()}catch(e){}
+    });
+    var savedName="";try{savedName=localStorage.getItem("changeTracker_username")||""}catch(e){}
+    if(savedName.trim()){
+      cachedUsername=savedName.trim();userDisp.textContent="\uD83D\uDC64 "+cachedUsername;changeUserLink.style.display="inline";
+      log("\u2705 Welcome back, "+cachedUsername,"ok");await startTracking();
+    }else{
+      log("\u26A0 No username found. Sheet locked until you identify yourself.","wr");setBadge("Locked","badge-lock");
+      await Excel.run(async function(ctx){var ws=ctx.workbook.worksheets.getItem(TRACKED_SHEET);ws.protection.protect({allowAutoFilter:true,allowSort:true});await ctx.sync()});
+      lockBanner.style.display="block";namePromptDiv.style.display="block";nameInput.focus();
+      btnSaveName.addEventListener("click",onUsernameSaved);nameInput.addEventListener("keydown",function(e){if(e.key==="Enter")onUsernameSaved()});
+    }
+  }catch(error){log("\u274C Init error: "+errorToString(error),"er");setBadge("Error","badge-err")}
+});
+
+async function onUsernameSaved(){
+  var val=nameInput.value.trim();if(!val){nameInput.style.borderColor="#d13438";return}
+  cachedUsername=val;try{localStorage.setItem("changeTracker_username",val)}catch(e){}
+  userDisp.textContent="\uD83D\uDC64 "+cachedUsername;changeUserLink.style.display="inline";
+  namePromptDiv.style.display="none";lockBanner.style.display="none";log("\u2705 Username set: "+val,"ok");
+  try{await Excel.run(async function(ctx){var ws=ctx.workbook.worksheets.getItem(TRACKED_SHEET);ws.protection.unprotect();await ctx.sync()});log("\uD83D\uDD13 Sheet unlocked","ok")}catch(e){log("\u26A0 Unprotect: "+errorToString(e),"wr")}
+  await startTracking();
+}
+
+async function changeUser(){
+  try{localStorage.removeItem("changeTracker_username")}catch(e){}cachedUsername="";userDisp.textContent="";changeUserLink.style.display="none";isTracking=false;setBadge("Locked","badge-lock");
+  try{await Excel.run(async function(ctx){var ws=ctx.workbook.worksheets.getItem(TRACKED_SHEET);ws.protection.protect({allowAutoFilter:true,allowSort:true});await ctx.sync()})}catch(e){}
+  lockBanner.style.display="block";namePromptDiv.style.display="block";nameInput.value="";nameInput.focus();log("\uD83D\uDD04 Username cleared. Enter new name.","wr");
+}
+
+async function startTracking(){
+  if(isTracking){log("\u26A0 Already tracking!","wr");return}
+  log("\u23F3 Setting up tracker...","in");
+  try{await Excel.run(async function(ctx){
+    log("  Step 1: Finding sheet...","in");
+    var ws=ctx.workbook.worksheets.getItemOrNullObject(TRACKED_SHEET);ws.load("name");await ctx.sync();
+    if(ws.isNullObject){log("\u274C Sheet not found!","er");setBadge("Error","badge-err");return}
+    log("  Step 1 done: "+ws.name,"ok");
+
+    log("  Step 2: Dimensions...","in");
+    var used=ws.getUsedRange();used.load(["rowCount","columnCount"]);await ctx.sync();
+    var totalRows=used.rowCount,totalCols=used.columnCount;
+    log("  Step 2 done: "+totalRows+" x "+totalCols,"ok");
+
+    log("  Step 3: Headers...","in");
+    var hdr=ws.getRangeByIndexes(0,0,1,totalCols);hdr.load("values");await ctx.sync();
+    var hdrRow=hdr.values[0];HEADERS=[];var lastN=-1;
+    for(var i=0;i<hdrRow.length;i++){var h=(hdrRow[i]==null?"":hdrRow[i]).toString().trim();HEADERS.push(h);if(h)lastN=i}
+    effectiveColCount=lastN+1;if(effectiveColCount<1)effectiveColCount=totalCols;
+    CHUNK_SIZE=Math.max(500,Math.floor(80000/effectiveColCount));
+    var pv=[];for(var p=0;p<HEADERS.length&&pv.length<8;p++)if(HEADERS[p]&&HEADERS[p]!==ROWID_HEADER)pv.push(HEADERS[p]);
+    log("  Step 3 done: "+effectiveColCount+" cols, chunk="+CHUNK_SIZE,"ok");
+    log("  Headers: "+pv.join(", ")+"...","in");
+
+    log("  Step 4: Changelog sheet...","in");
+    var logSh=ctx.workbook.worksheets.getItemOrNullObject(CHANGELOG_SHEET);logSh.load("name");await ctx.sync();
+    if(logSh.isNullObject){logSh=ctx.workbook.worksheets.add(CHANGELOG_SHEET);log("  Created 'changelog'","ok")}
+    var lh=logSh.getRangeByIndexes(0,0,1,7);lh.values=[["Timestamp","username","Sheet","Cell","Column Name","Old Value","New Value"]];lh.format.font.bold=true;await ctx.sync();
+    log("  Step 4 done","ok");
+
+    log("  Step 5: RowID column...","in");
+    rowIdColIdx=HEADERS.indexOf(ROWID_HEADER);var dataUpdated=false;
+    if(rowIdColIdx===-1){
+      rowIdColIdx=effectiveColCount;log("  Adding RowID at col "+(rowIdColIdx+1),"in");
+      var ra=[[ROWID_HEADER]];for(var rr=FIRST_DATA_ROW;rr<totalRows;rr++)ra.push([generateRowId()]);
+      await writeColumnInChunks(ctx,ws,rowIdColIdx,ra,CHUNK_SIZE);
+      var hc=ws.getRangeByIndexes(0,rowIdColIdx,1,1).getEntireColumn();hc.columnHidden=true;await ctx.sync();
+      effectiveColCount=rowIdColIdx+1;HEADERS.push(ROWID_HEADER);CHUNK_SIZE=Math.max(500,Math.floor(80000/effectiveColCount));dataUpdated=true;
+      log("  RowID created ("+(totalRows-1)+" IDs)","ok");
+    }else{
+      var rc=ws.getRangeByIndexes(0,rowIdColIdx,totalRows,1);rc.load("values");await ctx.sync();var rv=rc.values;var bl=0;
+      for(var rb=FIRST_DATA_ROW;rb<rv.length;rb++){var v=(rv[rb][0]==null?"":rv[rb][0]).toString().trim();if(!v){rv[rb][0]=generateRowId();bl++}}
+      if(bl>0){await writeColumnInChunks(ctx,ws,rowIdColIdx,rv,CHUNK_SIZE);dataUpdated=true;log("  Filled "+bl+" blank RowIDs","ok")}
+      var hc2=ws.getRangeByIndexes(0,rowIdColIdx,1,1).getEntireColumn();hc2.columnHidden=true;await ctx.sync();
+    }
+    log("  Step 5 done (col="+rowIdColIdx+")","ok");
+
+    if(dataUpdated){
+      log("  Step 5b: Re-reading...","in");
+      var nu=ws.getUsedRange();nu.load(["rowCount","columnCount"]);await ctx.sync();totalRows=nu.rowCount;totalCols=nu.columnCount;
+      var nh=ws.getRangeByIndexes(0,0,1,totalCols);nh.load("values");await ctx.sync();HEADERS=[];var nL=-1;
+      for(var ni=0;ni<nh.values[0].length;ni++){var nn=(nh.values[0][ni]==null?"":nh.values[0][ni]).toString().trim();HEADERS.push(nn);if(nn)nL=ni}
+      effectiveColCount=nL+1;if(effectiveColCount<1)effectiveColCount=totalCols;rowIdColIdx=HEADERS.indexOf(ROWID_HEADER);
+      CHUNK_SIZE=Math.max(500,Math.floor(80000/effectiveColCount));log("  Step 5b done","ok");
+    }
+
+    log("  Step 6: Loading shadow ("+totalRows+" rows)...","in");
+    var all=await readRangeInChunks(ctx,ws,0,totalRows,effectiveColCount,CHUNK_SIZE);
+    shadowByRowId={};rowIndexToRowId={};
+    for(var sr=FIRST_DATA_ROW;sr<all.length;sr++){var rid=(all[sr][rowIdColIdx]==null?"":all[sr][rowIdColIdx]).toString().trim();if(rid){shadowByRowId[rid]={rowIdx:sr,values:all[sr].slice()};rowIndexToRowId[sr]=rid}}
+    log("  Step 6 done: "+Object.keys(shadowByRowId).length+" rows indexed","ok");
+
+    log("  Step 7: Event handler...","in");ws.onChanged.add(onWorksheetChanged);await ctx.sync();log("  Step 7 done","ok");
+
+    isTracking=true;setBadge("Active","badge-on");updateCount();
+    log("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500","in");
+    log("\uD83C\uDFAF TRACKING ACTIVE for "+cachedUsername,"ok");log("Edit cells \u2014 changes logged instantly","ok");
+    log("\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500","in");
+  })}catch(error){log("\u274C Setup error: "+errorToString(error),"er");setBadge("Error","badge-err")}
+}
+
+async function onWorksheetChanged(event){
+  if(isInternalUpdate)return;
+  try{await Excel.run(async function(ctx){
+    var sheet=ctx.workbook.worksheets.getItem(event.worksheetId);sheet.load("name");await ctx.sync();
+    if(sheet.name!==TRACKED_SHEET)return;
+    var structural=["RowInserted","RowDeleted","ColumnInserted","ColumnDeleted","CellInserted","CellDeleted"];
+    if(structural.indexOf(event.changeType)!==-1){await handleStructuralChange(ctx,sheet,event);return}
+    var changed=sheet.getRange(event.address);changed.load(["rowIndex","columnIndex","rowCount","columnCount","values"]);await ctx.sync();
+    var ts=formatTimestamp(new Date()),logRows=[];
+    for(var r=0;r<changed.rowCount;r++)for(var c=0;c<changed.columnCount;c++){
+      var absRow=changed.rowIndex+r,absCol=changed.columnIndex+c;
+      if(absRow===HEADER_ROW||absCol===rowIdColIdx)continue;
+      var newVal=changed.values[r][c],oldVal=getOldValue(absRow,absCol);
+      if(valuesAreEqual(oldVal,newVal))continue;
+      var oldD=displayValue(oldVal),newD=displayValue(newVal);if(oldD===newD)continue;
+      var colN=HEADERS[absCol]||("Col"+(absCol+1)),addr=colToA1(absCol)+(absRow+1);
+      logRows.push([ts,cachedUsername,TRACKED_SHEET,addr,colN,oldD,newD]);
+      log("  \uD83D\uDCDD "+addr+" ("+colN+"): \""+oldD+"\" \u2192 \""+newD+"\"","ed");updateShadow(absRow,absCol,newVal);
+    }
+    if(logRows.length>0){
+      isInternalUpdate=true;var logSh=ctx.workbook.worksheets.getItem(CHANGELOG_SHEET);
+      var ins=logSh.getRangeByIndexes(1,0,logRows.length,7);ins.insert(Excel.InsertShiftDirection.down);
+      var wr=logSh.getRangeByIndexes(1,0,logRows.length,7);wr.values=logRows;await ctx.sync();
+      isInternalUpdate=false;changeCount+=logRows.length;updateCount();log("  \u2705 "+logRows.length+" change(s) logged","ok");
+    }
+  })}catch(error){isInternalUpdate=false;log("\u274C Handler: "+errorToString(error),"er")}
+}
+
+async function handleStructuralChange(ctx,sheet,event){
+  log("\u26A1 Structural: "+event.changeType+" at "+event.address,"wr");
+  try{
+    isInternalUpdate=true;var ts=formatTimestamp(new Date());
+    var logSh=ctx.workbook.worksheets.getItem(CHANGELOG_SHEET);var ins=logSh.getRangeByIndexes(1,0,1,7);ins.insert(Excel.InsertShiftDirection.down);
+    var wr=logSh.getRangeByIndexes(1,0,1,7);wr.values=[[ts,cachedUsername,TRACKED_SHEET,event.address,"["+event.changeType+"]","",""]];await ctx.sync();
+    isInternalUpdate=false;changeCount++;updateCount();
+    log("  \u23F3 Re-syncing shadow...","in");
+    var used=sheet.getUsedRange();used.load(["rowCount","columnCount"]);await ctx.sync();var ntr=used.rowCount;
+    var nh=sheet.getRangeByIndexes(0,0,1,used.columnCount);nh.load("values");await ctx.sync();HEADERS=[];var nL=-1;
+    for(var ni=0;ni<nh.values[0].length;ni++){var nn=(nh.values[0][ni]==null?"":nh.values[0][ni]).toString().trim();HEADERS.push(nn);if(nn)nL=ni}
+    effectiveColCount=nL+1;if(effectiveColCount<1)effectiveColCount=used.columnCount;rowIdColIdx=HEADERS.indexOf(ROWID_HEADER);
+    CHUNK_SIZE=Math.max(500,Math.floor(80000/effectiveColCount));
+    if(rowIdColIdx>=0){var rc=sheet.getRangeByIndexes(0,rowIdColIdx,ntr,1);rc.load("values");await ctx.sync();var rv=rc.values;var bl=0;
+      for(var rb=FIRST_DATA_ROW;rb<rv.length;rb++){var v=(rv[rb][0]==null?"":rv[rb][0]).toString().trim();if(!v){rv[rb][0]=generateRowId();bl++}}
+      if(bl>0){await writeColumnInChunks(ctx,sheet,rowIdColIdx,rv,CHUNK_SIZE);log("  \uD83D\uDD27 "+bl+" new RowIDs","ok")}}
+    var all=await readRangeInChunks(ctx,sheet,0,ntr,effectiveColCount,CHUNK_SIZE);shadowByRowId={};rowIndexToRowId={};
+    for(var sr=FIRST_DATA_ROW;sr<all.length;sr++){var rid=(all[sr][rowIdColIdx]==null?"":all[sr][rowIdColIdx]).toString().trim();if(rid){shadowByRowId[rid]={rowIdx:sr,values:all[sr].slice()};rowIndexToRowId[sr]=rid}}
+    log("  \u2705 Shadow re-synced: "+Object.keys(shadowByRowId).length+" rows","ok");
+  }catch(e2){isInternalUpdate=false;log("  \u274C Struct err: "+errorToString(e2),"er")}
+}
+
+function getOldValue(a,c){var rid=rowIndexToRowId[a];if(!rid)return"";var e=shadowByRowId[rid];if(!e)return"";return c<e.values.length?e.values[c]:""}
+function updateShadow(a,c,v){var rid=rowIndexToRowId[a];if(!rid)return;var e=shadowByRowId[rid];if(e&&c<e.values.length)e.values[c]=v}
+
+async function readRangeInChunks(ctx,sheet,startRow,totalRows,totalCols,chunkSize){
+  var all=[],cur=startRow;
+  while(cur<startRow+totalRows){var n=Math.min(chunkSize,startRow+totalRows-cur);var ok=false;
+    while(!ok){try{var cr=sheet.getRangeByIndexes(cur,0,n,totalCols);cr.load("values");await ctx.sync();for(var r=0;r<cr.values.length;r++)all.push(cr.values[r]);ok=true}catch(e){if(n<=100)throw e;n=Math.floor(n/2);log("\u26A0 Read retry: "+n+" rows","wr")}}cur+=n}return all}
+
+async function writeRangeInChunks(ctx,sheet,data,chunkSize){
+  if(!data.length)return;var tc=data[0].length,cur=0;
+  while(cur<data.length){var n=Math.min(chunkSize,data.length-cur);var ok=false;
+    while(!ok){try{var ch=[];for(var r=0;r<n;r++)ch.push(data[cur+r]);var wr=sheet.getRangeByIndexes(cur,0,n,tc);wr.values=ch;await ctx.sync();ok=true}catch(e){if(n<=100)throw e;n=Math.floor(n/2);log("\u26A0 Write retry: "+n,"wr")}}cur+=n}}
+
+async function writeColumnInChunks(ctx,sheet,colIdx,data,chunkSize){
+  if(!data.length)return;var cur=0;
+  while(cur<data.length){var n=Math.min(chunkSize,data.length-cur);var ok=false;
+    while(!ok){try{var ch=[];for(var r=0;r<n;r++)ch.push(data[cur+r]);var wr=sheet.getRangeByIndexes(cur,colIdx,n,1);wr.values=ch;await ctx.sync();ok=true}catch(e){if(n<=100)throw e;n=Math.floor(n/2);log("\u26A0 Col retry: "+n,"wr")}}cur+=n}}
+
+function valuesAreEqual(a,b){var aE=(a===null||a===undefined||a===""),bE=(b===null||b===undefined||b==="");if(aE&&bE)return true;if(aE!==bE)return false;if(a===b)return true;if(typeof a==="number"&&typeof b==="number"){var d=Math.abs(a-b),m=Math.max(Math.abs(a),Math.abs(b),1);return d/m<1e-10}var sA=(a==null?"":a).toString().trim(),sB=(b==null?"":b).toString().trim();if(sA===sB)return true;var nA=Number(sA),nB=Number(sB);if(!isNaN(nA)&&!isNaN(nB)&&sA!==""&&sB!==""){if(nA===nB)return true;var d2=Math.abs(nA-nB),m2=Math.max(Math.abs(nA),Math.abs(nB),1);return d2/m2<1e-10}var bA=sA.toLowerCase(),bB=sB.toLowerCase();if((bA==="true"||bA==="false")&&(bB==="true"||bB==="false"))return bA===bB;return false}
+function displayValue(v){if(v===null||v===undefined||v==="")return"";if(typeof v==="boolean")return v?"TRUE":"FALSE";if(typeof v==="number")return parseFloat(v.toPrecision(15)).toString();return v.toString().trim()}
+function generateRowId(){var hex="";for(var i=0;i<16;i++)hex+=Math.floor(Math.random()*16).toString(16);return"RID-"+hex}
+function formatTimestamp(d){var mm=String(d.getMonth()+1).padStart(2,"0"),dd=String(d.getDate()).padStart(2,"0"),yyyy=d.getFullYear(),h=d.getHours(),ap=h>=12?"PM":"AM";h=h%12||12;return mm+"/"+dd+"/"+yyyy+" "+String(h).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0")+":"+String(d.getSeconds()).padStart(2,"0")+" "+ap}
+function colToA1(idx){var r="",i=idx;while(i>=0){r=String.fromCharCode((i%26)+65)+r;i=Math.floor(i/26)-1}return r}
+</script>
+</body>
+</html>
