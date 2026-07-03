@@ -1,0 +1,24 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python virtual environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDE configurations
+.idea/
+.vscode/
+
+# Scraper output & tracker Excel databases (to prevent repository bloating)
+job_applications.xlsx
+*.xlsx
+*.csv
+*.json
+
+# Sensitive configuration files containing API keys
+.env
+.env.local
